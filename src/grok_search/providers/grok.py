@@ -227,6 +227,11 @@ class GrokSearchProvider(BaseSearchProvider):
                 {"role": "user", "content": time_context + query + platform_prompt},
             ],
             "stream": True,
+            "search_parameters": {
+                "mode": "on",
+                "return_citations": True,
+                "max_search_results": max(min_results, max_results),
+            },
         }
 
         await log_info(ctx, f"platform_prompt: { query + platform_prompt}", config.debug_enabled)

@@ -153,7 +153,7 @@ async def test_search_live_payload_includes_web_search_tool():
 
 def test_live_search_eligible_models():
     from grok_search.config import config
-    assert "grok-4.20-expert" in config.LIVE_SEARCH_ELIGIBLE_MODELS
-    assert "grok-4.20-reasoning" in config.LIVE_SEARCH_ELIGIBLE_MODELS
-    assert "grok-4-1-fast" in config.LIVE_SEARCH_ELIGIBLE_MODELS
-    assert "grok-4.20-beta" not in config.LIVE_SEARCH_ELIGIBLE_MODELS
+    # Intentionally empty: Guda proxy returns HTTP 500 on /v1/responses.
+    # All models are forced onto legacy /v1/chat/completions path with
+    # search_parameters to trigger real web search.
+    assert config.LIVE_SEARCH_ELIGIBLE_MODELS == frozenset()
