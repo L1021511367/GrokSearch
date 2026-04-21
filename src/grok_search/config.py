@@ -12,6 +12,11 @@ class Config:
     )
     _DEFAULT_MODEL = "grok-4.20-beta"
     _DEFAULT_GUDA_BASE_URL = "https://code.guda.studio"
+    LIVE_SEARCH_ELIGIBLE_MODELS: frozenset[str] = frozenset({
+        "grok-4.20-reasoning",
+        "grok-4.20-expert",
+        "grok-4-1-fast",
+    })
 
     def __new__(cls):
         if cls._instance is None:

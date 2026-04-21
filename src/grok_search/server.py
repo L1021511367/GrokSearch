@@ -129,7 +129,8 @@ async def web_search(
     query: Annotated[str, "Clear, self-contained natural-language search query."],
     platform: Annotated[str, "Target platform to focus on (e.g., 'Twitter', 'GitHub', 'Reddit'). Leave empty for general web search."] = "",
     model: Annotated[str, "Optional model ID for this request only. This value is used ONLY when user explicitly provided."] = "",
-    extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 0."] = 0,
+    extra_sources: Annotated[int, "Number of additional reference results from Tavily/Firecrawl. Set 0 to disable. Default 3."] = 3,
+    use_live_search: Annotated[bool, "Route eligible models to xAI /v1/responses with web_search tool for structured real-time sources. Default True."] = True,
 ) -> dict:
     session_id = new_session_id()
     try:
@@ -163,12 +164,16 @@ async def web_search(
         elif has_tavily:
             tavily_count = extra_sources
 
+    live_search_route = use_live_search and effective_model in config.LIVE_SEARCH_ELIGIBLE_MODELS
+
     # 并行执行搜索任务
-    async def _safe_grok() -> str:
+    async def _safe_grok():
         try:
+            if live_search_route:
+                return await grok_provider.search_live(query, platform)
             return await grok_provider.search(query, platform)
         except Exception:
-            return ""
+            return "" if not live_search_route else ("", [])
 
     async def _safe_tavily() -> list[dict] | None:
         try:
@@ -192,7 +197,7 @@ async def web_search(
 
     gathered = await asyncio.gather(*coros)
 
-    grok_result: str = gathered[0] or ""
+    grok_payload = gathered[0]
     tavily_results: list[dict] | None = None
     firecrawl_results: list[dict] | None = None
     idx = 1
@@ -202,7 +207,18 @@ async def web_search(
     if firecrawl_count > 0:
         firecrawl_results = gathered[idx]
 
-    answer, grok_sources = split_answer_and_sources(grok_result)
+    if live_search_route:
+        if isinstance(grok_payload, tuple):
+            answer, grok_sources = grok_payload
+        else:
+            answer, grok_sources = "", []
+        if not grok_sources and answer:
+            _, fallback_sources = split_answer_and_sources(answer)
+            grok_sources = fallback_sources
+    else:
+        grok_result = grok_payload or ""
+        answer, grok_sources = split_answer_and_sources(grok_result)
+
     extra = _extra_results_to_sources(tavily_results, firecrawl_results)
     all_sources = merge_sources(grok_sources, extra)
 

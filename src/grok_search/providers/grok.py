@@ -70,6 +70,86 @@ def _needs_time_context(query: str) -> bool:
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
+def _parse_responses_api(resp_json: dict) -> tuple[str, list[dict]]:
+    """解析 xAI /v1/responses 返回的结构化 JSON：抽出正文 + 结构化信源列表。
+
+    支持的两条信源路径（按优先级合并，URL 去重）：
+    1. output[].content[].annotations[] 中的 url_citation
+    2. output[type=web_search_call].action.sources[] 中的 URL 列表
+    """
+    answer_parts: list[str] = []
+    sources: list[dict] = []
+    seen: set[str] = set()
+
+    def _push(url: str, title: str = "", snippet: str = "") -> None:
+        u = (url or "").strip()
+        if not u or not u.startswith(("http://", "https://")):
+            return
+        if u in seen:
+            return
+        seen.add(u)
+        item: dict = {"url": u, "source_provider": "grok_live_search"}
+        t = (title or "").strip()
+        if t:
+            item["title"] = t
+        s = (snippet or "").strip()
+        if s:
+            item["snippet"] = s
+        sources.append(item)
+
+    # 顶层便捷字段
+    if isinstance(resp_json, dict):
+        top_output_text = resp_json.get("output_text")
+        if isinstance(top_output_text, str) and top_output_text.strip():
+            answer_parts.append(top_output_text)
+
+        output_list = resp_json.get("output") or []
+        if not isinstance(output_list, list):
+            output_list = []
+
+        for item in output_list:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+
+            if item_type == "message":
+                content_list = item.get("content") or []
+                for block in content_list or []:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type in ("output_text", "text"):
+                        text_val = block.get("text") or ""
+                        if isinstance(text_val, str) and text_val.strip():
+                            if not answer_parts or answer_parts[-1] != text_val:
+                                answer_parts.append(text_val)
+                    annotations = block.get("annotations") or []
+                    for ann in annotations or []:
+                        if not isinstance(ann, dict):
+                            continue
+                        if ann.get("type") == "url_citation":
+                            _push(
+                                ann.get("url") or "",
+                                ann.get("title") or "",
+                                ann.get("snippet") or ann.get("description") or "",
+                            )
+            elif item_type == "web_search_call":
+                action = item.get("action") or {}
+                action_sources = action.get("sources") or []
+                for s in action_sources or []:
+                    if isinstance(s, str):
+                        _push(s)
+                    elif isinstance(s, dict):
+                        _push(
+                            s.get("url") or "",
+                            s.get("title") or "",
+                            s.get("snippet") or s.get("description") or "",
+                        )
+
+    answer = "\n".join(p for p in answer_parts if p).strip()
+    return answer, sources
+
+
 def _is_retryable_exception(exc) -> bool:
     """检查异常是否可重试"""
     if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError, httpx.RemoteProtocolError)):
@@ -232,6 +312,63 @@ class GrokSearchProvider(BaseSearchProvider):
                     ) as response:
                         response.raise_for_status()
                         return await self._parse_streaming_response(response, ctx)
+
+    async def _execute_json_with_retry(self, endpoint: str, headers: dict, payload: dict, ctx=None) -> dict:
+        """非流式 JSON POST + 重试，用于 /v1/responses"""
+        timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
+
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(config.retry_max_attempts + 1),
+                wait=_WaitWithRetryAfter(config.retry_multiplier, config.retry_max_wait),
+                retry=retry_if_exception(_is_retryable_exception),
+                reraise=True,
+            ):
+                with attempt:
+                    response = await client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    return response.json()
+
+    async def search_live(
+        self,
+        query: str,
+        platform: str = "",
+        ctx=None,
+    ) -> tuple[str, list[dict]]:
+        """通过 xAI Responses API + web_search 工具执行真实联网搜索。
+
+        返回 (answer, sources)。answer 为文本正文，sources 为结构化信源列表，
+        每条含 {url, title, snippet, source_provider}。
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        user_text = query
+        if platform:
+            user_text = (
+                f"{query}\n\nFocus on these platforms: {platform}\n"
+            )
+        if _needs_time_context(query):
+            user_text = get_local_time_info() + "\n" + user_text
+
+        payload = {
+            "model": self.model,
+            "input": user_text,
+            "tools": [{"type": "web_search"}],
+            "include": [
+                "web_search_call.action.sources",
+            ],
+        }
+
+        endpoint = f"{self.api_url}/responses"
+        await log_info(ctx, f"search_live payload: model={self.model} query={query}", config.debug_enabled)
+
+        resp_json = await self._execute_json_with_retry(endpoint, headers, payload, ctx)
+        await log_info(ctx, f"search_live raw: {json.dumps(resp_json)[:2000]}", config.debug_enabled)
+
+        return _parse_responses_api(resp_json)
 
     async def describe_url(self, url: str, ctx=None) -> dict:
         """让 Grok 阅读单个 URL 并返回 title + extracts"""

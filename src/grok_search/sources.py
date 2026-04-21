@@ -10,7 +10,11 @@ import asyncio
 from .utils import extract_unique_urls
 
 
-_MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+_MD_LINK_PATTERN = re.compile(r"\[((?:\[[^\[\]]*\]|[^\[\]])+?)\]\((https?://[^)\s]+)\)")
+_CITATION_CARD_BLOCK_PATTERN = re.compile(
+    r"```(?:citation_card|source_card|source_cards)\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
 _SOURCES_HEADING_PATTERN = re.compile(
     r"(?im)^"
     r"(?:#{1,6}\s*)?"
@@ -76,6 +80,10 @@ def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
     if split:
         return split
 
+    split = _split_citation_card_blocks(raw)
+    if split:
+        return split
+
     split = _split_heading_sources(raw)
     if split:
         return split
@@ -88,7 +96,67 @@ def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
     if split:
         return split
 
+    # Inline-only fallback: scan全文 markdown 链接（含嵌套括号如 [[1]](url)），
+    # dedup 后作为 sources 返回；answer 原样保留。为下游 intel_collector 保底。
+    inline_sources = _extract_sources_from_text(raw)
+    if inline_sources:
+        return raw, inline_sources
+
     return raw, []
+
+
+def _split_citation_card_blocks(text: str) -> tuple[str, list[dict]] | None:
+    matches = list(_CITATION_CARD_BLOCK_PATTERN.finditer(text))
+    if not matches:
+        return None
+
+    sources: list[dict] = []
+    seen: set[str] = set()
+
+    for m in matches:
+        block_body = m.group(1) or ""
+        card = _parse_citation_card_body(block_body)
+        if not card:
+            continue
+        url = card.get("url")
+        if not isinstance(url, str) or url in seen:
+            continue
+        seen.add(url)
+        sources.append(card)
+
+    if not sources:
+        return None
+
+    # answer = 去掉所有 citation_card 围栏块后的文本
+    answer = _CITATION_CARD_BLOCK_PATTERN.sub("", text).strip()
+    return answer, sources
+
+
+def _parse_citation_card_body(body: str) -> dict | None:
+    """解析 citation_card 块内 key: value 行，必须含合法 url。"""
+    fields: dict = {}
+    for line in (body or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        key = key.strip().lower()
+        value = value.strip().strip('"').strip("'")
+        if key in ("url", "title", "snippet", "description"):
+            fields[key] = value
+
+    url = fields.get("url", "")
+    if not url.startswith(("http://", "https://")):
+        return None
+
+    out: dict = {"url": url}
+    title = fields.get("title")
+    if title:
+        out["title"] = title
+    snippet = fields.get("snippet") or fields.get("description")
+    if snippet:
+        out["description"] = snippet
+    return out
 
 
 def _split_function_call_sources(text: str) -> tuple[str, list[dict]] | None:
