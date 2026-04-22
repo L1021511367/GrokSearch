@@ -299,6 +299,7 @@ class GrokSearchProvider(BaseSearchProvider):
 
     async def _execute_stream_with_retry(self, headers: dict, payload: dict, ctx=None) -> str:
         """执行带重试机制的流式 HTTP 请求"""
+        await log_info(ctx, f"HTTP endpoint: POST {self.api_url}/chat/completions", True)
         timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -320,6 +321,7 @@ class GrokSearchProvider(BaseSearchProvider):
 
     async def _execute_json_with_retry(self, endpoint: str, headers: dict, payload: dict, ctx=None) -> dict:
         """非流式 JSON POST + 重试，用于 /v1/responses"""
+        await log_info(ctx, f"HTTP endpoint: POST {endpoint}", True)
         timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
 
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
